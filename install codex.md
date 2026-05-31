@@ -78,3 +78,159 @@ codex exec --sandbox workspace-write "修复 origincar_avoid 包中的 launch �
 codex exec --dangerously-bypass-approvals-and-sandbox "..."
 
 官方文档明确说这个会绕过审批和沙箱，只建议在隔离 runner 里使用。
+
+
+
+
+. 检查 Ubuntu 的 AppArmor 限制
+
+你这台机器看起来是 Ubuntu 桌面系统，很可能是 Ubuntu 24.04 / 25.04 之后的限制。
+
+先看这两个值：
+
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined
+
+如果输出是：
+
+1
+
+1
+
+就说明 AppArmor 对非特权 user namespace 有限制。Codex 官方文档说，Ubuntu 24.04 可能需要加载额外的 bwrap AppArmor profile；Ubuntu 25.04 中相关 profile 通常随 apparmor 包提供。
+
+
+2. 检查 user namespace 是否开启
+
+执行：
+
+cat /proc/sys/kernel/unprivileged_userns_clone
+
+如果输出是：
+
+1
+
+说明这一项没问题。
+
+
+
+
+
+
+
+你的输出说明：
+
+```text
+unprivileged_userns_clone = 1
+apparmor_restrict_unprivileged_userns = 1
+apparmor_restrict_unprivileged_unconfined = 0
+```
+
+所以问题不是 `user namespace` 没开，而是 **AppArmor 限制了 bubblewrap 创建非特权 user namespace**。Codex 官方说明 Ubuntu 24.04 上即使安装了 `bubblewrap`，仍可能提示这个警告，需要加载 `bwrap-userns-restrict` AppArmor profile。([OpenAI开发者][1])
+
+你按这个来处理。
+
+## 方案一：推荐，加载 bwrap 的 AppArmor 配置
+
+先退出 Codex，然后执行：
+
+```bash
+sudo apt update
+sudo apt install -y apparmor-profiles apparmor-utils
+```
+
+然后看这个文件在不在：
+
+```bash
+ls /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+```
+
+如果能看到文件，就执行：
+
+```bash
+sudo install -m 0644 \
+  /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+再重新进 Codex：
+
+```bash
+cd ~/ros2_ws
+codex
+```
+
+官方说明 `apparmor_parser -r` 会把 profile 加载进内核，不需要重启。([OpenAI开发者][1])
+
+---
+
+## 方案二：如果方案一找不到文件
+
+执行：
+
+```bash
+ls /etc/apparmor.d/ | grep bwrap
+```
+
+如果已经有：
+
+```text
+bwrap-userns-restrict
+```
+
+那就直接加载：
+
+```bash
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+sudo systemctl reload apparmor.service
+```
+
+然后重新打开：
+
+```bash
+codex
+```
+
+---
+
+## 方案三：临时关闭这个限制，不太推荐但最直接
+
+如果前两个方案都不行，可以临时关闭 AppArmor 对非特权 user namespace 的限制：
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+然后：
+
+```bash
+cd ~/ros2_ws
+codex
+```
+
+这个方法官方也给了，但它是全局放开限制，安全性比加载专门的 `bwrap` profile 差一点。([OpenAI开发者][1])
+
+---
+
+你现在优先执行这几条就行：
+
+```bash
+sudo apt update
+sudo apt install -y apparmor-profiles apparmor-utils
+
+sudo install -m 0644 \
+  /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+
+cd ~/ros2_ws
+codex
+```
+
+如果 `install` 那一步提示 **No such file or directory**，把报错发我。
+
+[1]: https://developers.openai.com/codex/concepts/sandboxing?utm_source=chatgpt.com "Sandbox – Codex"
+
